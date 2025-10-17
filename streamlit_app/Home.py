@@ -1,5 +1,7 @@
 import streamlit as st
 import os
+import importlib.util
+import traceback
 
 # --- Always first ---
 st.set_page_config(page_title="Micro Tools for Trading", layout="wide")
@@ -24,16 +26,27 @@ if app_mode == "Home":
 elif app_mode == "MLR with NIFTY50":
     st.subheader("📈 MLR with NIFTY50")
 
-    # Build path to your script dynamically (works regardless of where Streamlit runs)
-    file_path = os.path.join(r"D:\mini_tradeApp\micro-tools-trading\streamlit_app", "MLR_with_nifty50.py")
+    # Build relative path to the tool (portable)
+    file_dir = os.path.dirname(__file__)             # streamlit_app directory
+    file_path = os.path.join(file_dir, "MLR_with_nifty50.py")
 
-
-    # Safety check before executing
     if os.path.exists(file_path):
-        with open(file_path, "r", encoding="utf-8") as f:
-            code = f.read()
-            # Execute the file content directly
-            exec(code, globals())
+        # Try to import module cleanly and call run() if present
+        try:
+            spec = importlib.util.spec_from_file_location("mlr_tool", file_path)
+            mlr = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mlr)
+            if hasattr(mlr, "run") and callable(mlr.run):
+                # If the file defines a run() function, call it (recommended pattern)
+                mlr.run()
+            else:
+                # Fallback: execute file content (last resort)
+                with open(file_path, "r", encoding="utf-8") as f:
+                    code = f.read()
+                exec(code, globals())
+        except Exception as e:
+            st.error("Failed to load MLR_with_nifty50 tool.")
+            st.text(traceback.format_exc())
     else:
         st.error(f"File not found: {file_path}")
 
