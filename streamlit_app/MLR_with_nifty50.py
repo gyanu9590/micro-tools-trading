@@ -223,3 +223,149 @@ def run():
             st.warning("Could not compute OLS summary: " + str(e))
 
         st.success("Run complete.")
+        
+        # Use explicit date to avoid ambiguity
+    invest_start = pd.to_datetime("2024-01-01")   # 1 jan 2024
+    # Use last date available in preds / closes as "today" in this dataset
+    invest_end = preds.index.max()
+
+    # Basic checks
+    if invest_start > invest_end:
+        st.warning(f"No data available between {invest_start.date()} and {invest_end.date()}. Adjust the start date.")
+    else:
+        # Build DataFrame with needed series (ensure alignment)
+        sim = pd.DataFrame(index=preds.index)
+        sim["Actual_Return"] = y.reindex(sim.index)
+        sim["Predicted_Return"] = preds.reindex(sim.index)
+        # Signal: 1 if predicted > 0 (buy), 0 if predicted <= 0 (stay in cash)
+        sim["Signal"] = (sim["Predicted_Return"] > 0).astype(int)
+        # Strategy daily return: actual return only when in market
+        sim["Strategy_Return"] = sim["Actual_Return"] * sim["Signal"]
+
+        # Filter to the requested period
+        sim_period = sim.loc[(sim.index >= invest_start) & (sim.index <= invest_end)].copy()
+        if sim_period.empty:
+            st.warning("No overlapping dates between model predictions and the chosen start date.")
+        else:
+            initial_investment = 10000.0
+
+            # Cumulative returns
+            sim_period["Cum_Actual"] = (1 + sim_period["Actual_Return"]).cumprod()
+            sim_period["Cum_Strategy"] = (1 + sim_period["Strategy_Return"]).cumprod()
+
+            # Portfolio values
+            sim_period["Portfolio_BuyHold"] = initial_investment * sim_period["Cum_Actual"]
+            sim_period["Portfolio_Strategy"] = initial_investment * sim_period["Cum_Strategy"]
+
+            # Final values
+            final_buyhold = float(sim_period["Portfolio_BuyHold"].iloc[-1])
+            final_strategy = float(sim_period["Portfolio_Strategy"].iloc[-1])
+            pnl_buyhold = final_buyhold - initial_investment
+            pnl_strategy = final_strategy - initial_investment
+            pct_buyhold = (pnl_buyhold / initial_investment) * 100.0
+            pct_strategy = (pnl_strategy / initial_investment) * 100.0
+
+            # Performance metrics: Sharpe (annualized) and CAGR
+            # Use trading days approx 252 per year
+            if sim_period["Strategy_Return"].std() > 0:
+                daily_ret = sim_period["Strategy_Return"].mean()
+                daily_std = sim_period["Strategy_Return"].std()
+                sharpe = (daily_ret / daily_std) * np.sqrt(252)
+            else:
+                sharpe = np.nan
+
+            # CAGR (approx)
+            days = (sim_period.index[-1] - sim_period.index[0]).days
+            if days > 0:
+                cagr_strategy = (sim_period["Cum_Strategy"].iloc[-1]) ** (365.0 / days) - 1.0
+                cagr_buyhold = (sim_period["Cum_Actual"].iloc[-1]) ** (365.0 / days) - 1.0
+            else:
+                cagr_strategy = np.nan
+                cagr_buyhold = np.nan
+
+            # Display summary
+            st.subheader(f"Simulation: {invest_start.date()} → {invest_end.date()}")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Buy & Hold (final)", f"₹{final_buyhold:,.2f}", f"{pct_buyhold:.2f}%")
+                st.write(f"P/L: ₹{pnl_buyhold:,.2f}")
+                st.write(f"CAGR: {cagr_buyhold:.2%}" if not np.isnan(cagr_buyhold) else "CAGR: N/A")
+            with col2:
+                st.metric("Model Strategy (final)", f"₹{final_strategy:,.2f}", f"{pct_strategy:.2f}%")
+                st.write(f"P/L: ₹{pnl_strategy:,.2f}")
+                st.write(f"CAGR: {cagr_strategy:.2%}" if not np.isnan(cagr_strategy) else "CAGR: N/A")
+                st.write(f"Sharpe (ann.): {sharpe:.2f}" if (not np.isnan(sharpe)) else "Sharpe: N/A")
+
+            # Plot portfolio values
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=sim_period.index, y=sim_period["Portfolio_BuyHold"],
+                                    mode="lines", name="Buy & Hold"))
+            fig.add_trace(go.Scatter(x=sim_period.index, y=sim_period["Portfolio_Strategy"],
+                                    mode="lines", name="Model Strategy"))
+            fig.update_layout(title="Portfolio Value (₹)", yaxis_title="Portfolio Value (₹)",
+                            xaxis_title="Date", legend=dict(x=0, y=1))
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Show table of last few rows
+            st.subheader("Last 10 days (simulation)")
+            st.dataframe(sim_period[["Actual_Return", "Predicted_Return", "Signal", "Strategy_Return",
+                                    "Portfolio_BuyHold", "Portfolio_Strategy"]].tail(10).style.format({
+                                        "Actual_Return":"{:.4%}",
+                                        "Predicted_Return":"{:.4%}",
+                                        "Strategy_Return":"{:.4%}",
+                                        "Portfolio_BuyHold":"₹{:.2f}",
+                                        "Portfolio_Strategy":"₹{:.2f}"
+                                    }))
+
+            # Directional accuracy in the period
+            dir_acc = (np.sign(sim_period["Actual_Return"]) == np.sign(sim_period["Predicted_Return"])).mean() * 100.0
+            st.write(f"Directional accuracy in this period: **{dir_acc:.2f}%**")
+            n_days = len(sim_period)
+            days_in_market = sim_period['Signal'].sum()
+            pct_in_market = 100.0 * days_in_market / n_days
+
+            # directional accuracy
+            dir_acc = (np.sign(sim_period['Actual_Return']) == np.sign(sim_period['Predicted_Return'])).mean() * 100.0
+
+            # number of trades (count signal changes)
+            trades = sim_period['Signal'].diff().abs().sum()
+            # approximate number of buy operations:
+            num_buys = ((sim_period['Signal'].diff() == 1).sum())
+
+            # average return while in market
+            avg_return_in_market = sim_period.loc[sim_period['Signal']==1, 'Actual_Return'].mean()
+
+            # max drawdown function
+            def max_drawdown(series):
+                cum = series.cummax()
+                drawdown = (series - cum) / cum
+                return drawdown.min()
+
+            mdd_buy = max_drawdown(sim_period['Cum_Actual'])
+            mdd_strategy = max_drawdown(sim_period['Cum_Strategy'])
+
+            st.subheader("Trade & risk diagnostics")
+            st.write(f"Days in period: {n_days}")
+            st.write(f"Days in market: {int(days_in_market)} ({pct_in_market:.1f}%)")
+            st.write(f"Number of trades (entries/exits): {int(trades)}")
+            st.write(f"Number of buys (entries): {int(num_buys)}")
+            st.write(f"Directional accuracy: {dir_acc:.2f}%")
+            st.write(f"Average daily return while in market: {avg_return_in_market:.4%}")
+            st.write(f"Max drawdown (Buy & Hold): {mdd_buy:.2%}")
+            st.write(f"Max drawdown (Strategy): {mdd_strategy:.2%}")
+
+            # ---- Add transaction costs (example: 0.03% per trade) ----
+            tc = 0.0003  # 0.03% per trade round-trip (you can tune)
+            sim_tc = sim_period.copy()
+            # apply cost on every entry (when Signal goes from 0->1)
+            entry_mask = sim_tc['Signal'].diff() == 1
+            sim_tc.loc[entry_mask, 'Strategy_Return'] = sim_tc.loc[entry_mask, 'Strategy_Return'] - tc
+            # recompute cum and portfolio
+            sim_tc['Cum_Strategy_tc'] = (1 + sim_tc['Strategy_Return']).cumprod()
+            sim_tc['Portfolio_Strategy_tc'] = initial_investment * sim_tc['Cum_Strategy_tc']
+            st.write("Final strategy value with tx cost:", f"₹{sim_tc['Portfolio_Strategy_tc'].iloc[-1]:,.2f}")
+
+            # ---- Show first/last 10 trade rows for inspection ----
+            st.subheader("Sample trade rows (first / last 10)")
+            st.dataframe(sim_period[['Actual_Return','Predicted_Return','Signal','Portfolio_Strategy']].head(10))
+            st.dataframe(sim_period[['Actual_Return','Predicted_Return','Signal','Portfolio_Strategy']].tail(10))
